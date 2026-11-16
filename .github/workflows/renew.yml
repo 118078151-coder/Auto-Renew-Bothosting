@@ -36,8 +36,8 @@ jobs:
 
       - name: 🚀 运行续期脚本
         env:
-          EMAIL: ${{ l118078151@gmail.com }}
-          PASSWORD: ${{ Lichengfu106 }}
+                EMAIL: ${{ secrets.EMAIL }}
+                PASSWORD: ${{ secrets.PASSWORD }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
