@@ -277,6 +277,30 @@ def solve_turnstile(sb, timeout=90, tag="Turnstile", first_wait=8) -> bool:
 def handle_turnstile(sb) -> bool:
     print("🛡️ 处理 Turnstile 验证...")
     return solve_turnstile(sb, timeout=90, tag="Turnstile", first_wait=8)
+
+def solve_turnstile_fresh(sb, timeout=90, tag="Turnstile") -> bool:
+    # 点按钮后重现的 Turnstile 可能是旧 token 残留：先记下旧 token，
+    # 强制重新点验证框，等到一个不同的新 token 才算通过。
+    old_token = turnstile_token(sb)
+    print(f"🔄 强制重新验证 Turnstile（旧 token 长度 {len(old_token)}）...")
+    deadline = time.time() + timeout
+    next_click = time.time() + 2
+    clicks = 0
+    while time.time() < deadline:
+        token = turnstile_token(sb)
+        if token and token != old_token:
+            print(f"✅ {tag}已通过(新 token)")
+            return True
+        if time.time() >= next_click:
+            clicks += 1
+            print(f"🖱️ 第 {clicks} 次点击 Turnstile 验证框...")
+            click_turnstile(sb)
+            next_click = time.time() + 10 + random.uniform(0, 3)
+        time.sleep(2)
+    token = turnstile_token(sb)
+    ok = bool(token and token != old_token)
+    print(f"{'✅' if ok else '❌'} {tag}{'已通过(新 token)' if ok else '未通过(无新 token)'}")
+    return ok
     
 # 获取当前出口ip
 def get_current_ip(proxy_server: str = "") -> str:
@@ -604,9 +628,9 @@ def main():
                 for sub in range(2):
                     time.sleep(2)
                     if wait_turnstile_present(sb, timeout=5):
-                        print("🛡️ 点完按钮后弹窗内又出现 Turnstile，尝试通过...")
-                        if handle_turnstile(sb):
-                            print("✅ Turnstile 已通过，再点一次续期按钮...")
+                        print("🛡️ 点完按钮后弹窗内又出现 Turnstile，强制重新验证...")
+                        if solve_turnstile_fresh(sb, timeout=60, tag="Turnstile"):
+                            print("✅ Turnstile 已通过(新 token)，再点一次续期按钮...")
                             if _click_renew_button(f"尝试 {attempt + 1} 补点"):
                                 continue
                         print("❌ Turnstile 未通过或补点失败")
