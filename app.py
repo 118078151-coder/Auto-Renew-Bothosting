@@ -549,6 +549,30 @@ def main():
                     print(f"⚠️ CDP 坐标点击失败: {e}")
                 return False
 
+            def _click_renew_button(tag):
+                try:
+                    if _cdp_click_modal():
+                        print(f"✅ CDP 坐标点击续期按钮 ({tag})")
+                        return True
+                except Exception as e:
+                    print(f"⚠️ CDP 点击异常: {e}")
+                for selector in modal_selectors:
+                    try:
+                        if sb.is_element_visible(selector):
+                            sb.click(selector, timeout=8)
+                            print(f"✅ 已点击续期按钮 ({tag}, 选择器: {selector})")
+                            return True
+                    except Exception as e:
+                        print(f"⚠️ 选择器 {selector} 点击失败: {e}")
+                        continue
+                try:
+                    if _js_click_modal():
+                        print(f"✅ JS 点击续期按钮 ({tag})")
+                        return True
+                except Exception as e:
+                    print(f"⚠️ JS 点击失败: {e}")
+                return False
+
             def _diag_modal():
                 snap = js(sb, """
                     var out = [];
@@ -569,48 +593,34 @@ def main():
                 for line in str(snap).splitlines():
                     print("   [modal-diag] " + line)
 
+            # 关键：点按钮后若又出现 Turnstile，说明 token 被消耗/作废，
+            # 必须先过验证再重新点按钮，否则弹窗永远不关。
             modal_closed = False
-            for attempt in range(3):
-                clicked = False
-                try:
-                    if _cdp_click_modal():
-                        print(f"✅ CDP 坐标点击续期按钮 (尝试 {attempt + 1})")
-                        clicked = True
-                except Exception as e:
-                    print(f"⚠️ CDP 点击异常: {e}")
-                if not clicked:
-                    for selector in modal_selectors:
-                        try:
-                            if sb.is_element_visible(selector):
-                                sb.click(selector, timeout=8)
-                                print(f"✅ 已点击续期按钮 (尝试 {attempt + 1}, 选择器: {selector})")
-                                clicked = True
-                                break
-                        except Exception as e:
-                            print(f"⚠️ 选择器 {selector} 点击失败: {e}")
-                            continue
-                if not clicked:
-                    try:
-                        if _js_click_modal():
-                            print(f"✅ JS 点击续期按钮 (尝试 {attempt + 1})")
-                            clicked = True
-                    except Exception as e:
-                        print(f"⚠️ JS 点击失败: {e}")
-                if clicked:
-                    if wait_turnstile_present(sb, timeout=5):
-                        print("🛡️ 弹窗内出现 Turnstile，尝试通过...")
-                        handle_turnstile(sb)
-                    for _ in range(15):
-                        time.sleep(1)
-                        if not _modal_open():
-                            modal_closed = True
-                            break
-                    if modal_closed:
-                        print("✅ 续期弹窗已关闭")
-                        break
-                    print(f"⚠️ 弹窗未关闭，重试 ({attempt + 1}/3)")
-                else:
+            for attempt in range(5):
+                if not _click_renew_button(f"尝试 {attempt + 1}"):
                     print(f"⚠️ 第 {attempt + 1} 次未找到/点上续期按钮")
+                    time.sleep(2)
+                    continue
+                for sub in range(2):
+                    time.sleep(2)
+                    if wait_turnstile_present(sb, timeout=5):
+                        print("🛡️ 点完按钮后弹窗内又出现 Turnstile，尝试通过...")
+                        if handle_turnstile(sb):
+                            print("✅ Turnstile 已通过，再点一次续期按钮...")
+                            if _click_renew_button(f"尝试 {attempt + 1} 补点"):
+                                continue
+                        print("❌ Turnstile 未通过或补点失败")
+                        break
+                    break
+                for _ in range(15):
+                    time.sleep(1)
+                    if not _modal_open():
+                        modal_closed = True
+                        break
+                if modal_closed:
+                    print("✅ 续期弹窗已关闭")
+                    break
+                print(f"⚠️ 弹窗未关闭，重试 ({attempt + 1}/5)")
                 time.sleep(2)
 
             if not modal_closed:
