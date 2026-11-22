@@ -495,6 +495,7 @@ def main():
             time.sleep(5)
 
             modal_selectors = [
+                'div[role="dialog"] button:contains("Renew")',
                 'div[role="dialog"] button.btn-primary',
                 'div.modal button.btn-primary',
                 'button:contains("Renew")',
@@ -508,26 +509,86 @@ def main():
 
             def _js_click_modal():
                 return js(sb, """
-                    var btns = document.querySelectorAll('div[role="dialog"] button.btn-primary, .modal button.btn-primary');
+                    var btns = document.querySelectorAll('div[role="dialog"] button, .modal button');
                     for (var i = 0; i < btns.length; i++) {
-                        if (btns[i].offsetParent !== null && !btns[i].disabled) { btns[i].click(); return true; }
+                        var t = (btns[i].innerText || '').toLowerCase();
+                        if (btns[i].offsetParent !== null && !btns[i].disabled && t.indexOf('renew') !== -1) { btns[i].click(); return true; }
+                    }
+                    for (var j = 0; j < btns.length; j++) {
+                        if (btns[j].offsetParent !== null && !btns[j].disabled && (btns[j].className || '').indexOf('btn-primary') !== -1) { btns[j].click(); return true; }
                     }
                     return false;
                 """, False)
 
+            def _cdp_click_modal():
+                coords = js(sb, """
+                    var btns = document.querySelectorAll('div[role="dialog"] button, .modal button');
+                    var pick = null;
+                    for (var i = 0; i < btns.length; i++) {
+                        var t = (btns[i].innerText || '').toLowerCase();
+                        var r = btns[i].getBoundingClientRect();
+                        if (r.width > 20 && r.height > 10 && !btns[i].disabled && t.indexOf('renew') !== -1) { pick = btns[i]; break; }
+                    }
+                    if (!pick) {
+                        for (var j = 0; j < btns.length; j++) {
+                            var r2 = btns[j].getBoundingClientRect();
+                            if (r2.width > 20 && r2.height > 10 && !btns[j].disabled && (btns[j].className || '').indexOf('btn-primary') !== -1) { pick = btns[j]; break; }
+                        }
+                    }
+                    if (!pick) return null;
+                    var rr = pick.getBoundingClientRect();
+                    return {x: Math.round(rr.x + rr.width / 2), y: Math.round(rr.y + rr.height / 2)};
+                """, None)
+                if not coords:
+                    return False
+                try:
+                    if hasattr(sb, "cdp") and hasattr(sb.cdp, "gui_click_x_y"):
+                        sb.cdp.gui_click_x_y(int(coords["x"]), int(coords["y"]))
+                        return True
+                except Exception as e:
+                    print(f"⚠️ CDP 坐标点击失败: {e}")
+                return False
+
+            def _diag_modal():
+                snap = js(sb, """
+                    var out = [];
+                    var dlg = document.querySelector('div[role="dialog"], .modal');
+                    if (!dlg) return 'no dialog found';
+                    var btns = dlg.querySelectorAll('button');
+                    out.push('dialog buttons: ' + btns.length);
+                    for (var i = 0; i < btns.length; i++) {
+                        var r = btns[i].getBoundingClientRect();
+                        out.push(' - text=' + JSON.stringify((btns[i].innerText || '').trim()) + ' disabled=' + !!btns[i].disabled + ' visible=' + (r.width > 0 && r.height > 0) + ' class=' + (btns[i].className || ''));
+                    }
+                    var txt = (dlg.innerText || '').replace(/\\s+/g, ' ').slice(0, 400);
+                    out.push('dialog text: ' + txt);
+                    var ts = dlg.querySelector('input[name="cf-turnstile-response"]');
+                    out.push('turnstile input in dialog: ' + (ts ? ('value_len=' + (ts.value || '').length) : 'none'));
+                    return out.join('\\n');
+                """, "")
+                for line in str(snap).splitlines():
+                    print("   [modal-diag] " + line)
+
             modal_closed = False
             for attempt in range(3):
                 clicked = False
-                for selector in modal_selectors:
-                    try:
-                        if sb.is_element_visible(selector):
-                            sb.click(selector, timeout=8)
-                            print(f"✅ 已点击续期按钮 (尝试 {attempt + 1}, 选择器: {selector})")
-                            clicked = True
-                            break
-                    except Exception as e:
-                        print(f"⚠️ 选择器 {selector} 点击失败: {e}")
-                        continue
+                try:
+                    if _cdp_click_modal():
+                        print(f"✅ CDP 坐标点击续期按钮 (尝试 {attempt + 1})")
+                        clicked = True
+                except Exception as e:
+                    print(f"⚠️ CDP 点击异常: {e}")
+                if not clicked:
+                    for selector in modal_selectors:
+                        try:
+                            if sb.is_element_visible(selector):
+                                sb.click(selector, timeout=8)
+                                print(f"✅ 已点击续期按钮 (尝试 {attempt + 1}, 选择器: {selector})")
+                                clicked = True
+                                break
+                        except Exception as e:
+                            print(f"⚠️ 选择器 {selector} 点击失败: {e}")
+                            continue
                 if not clicked:
                     try:
                         if _js_click_modal():
@@ -536,7 +597,10 @@ def main():
                     except Exception as e:
                         print(f"⚠️ JS 点击失败: {e}")
                 if clicked:
-                    for _ in range(10):
+                    if wait_turnstile_present(sb, timeout=5):
+                        print("🛡️ 弹窗内出现 Turnstile，尝试通过...")
+                        handle_turnstile(sb)
+                    for _ in range(15):
                         time.sleep(1)
                         if not _modal_open():
                             modal_closed = True
@@ -550,7 +614,8 @@ def main():
                 time.sleep(2)
 
             if not modal_closed:
-                print("❌ 续期按钮点击失败，弹窗未关闭")
+                print("❌ 续期按钮点击失败，弹窗未关闭，打印弹窗诊断：")
+                _diag_modal()
                 send_telegram_message(format_notification("❌ 续期失败", error="弹窗续期按钮点击失败", expiry_date=current_expiry or "（未获取到）"))
                 sys.exit(1)
 
