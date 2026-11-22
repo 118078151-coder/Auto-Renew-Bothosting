@@ -467,7 +467,7 @@ def main():
             except Exception as e:
                 print(f"❌ 点击外部按钮失败: {e}")
                 send_telegram_message(format_notification("❌ 续期失败", error="点击外部续期按钮出错"))
-                return
+                sys.exit(1)
 
             # 处理弹窗中的 Turnstile
             turnstile_passed = True  # 未检测到 Turnstile 时视为无需验证
@@ -490,34 +490,94 @@ def main():
                 send_telegram_message(format_notification("❌ 续期失败", error="Turnstile 验证未通过"))
                 return
 
-            # 点击续期按钮
+            # 点击续期按钮（带确认+重试：确认弹窗关闭才算点上）
             print("⏳ 等待续期按钮可用并点击...")
-            time.sleep(5) 
+            time.sleep(5)
 
-            modal_button_clicked = False
-            try:
-                selector = 'div[role="dialog"] button.btn-primary' 
-                sb.click(selector, timeout=8)
-                modal_button_clicked = True
-                print("✅ 已点击续期按钮")
-            except Exception as e:
-                print(f"续期按钮点击失败: {e}")
+            modal_selectors = [
+                'div[role="dialog"] button.btn-primary',
+                'div.modal button.btn-primary',
+                'button:contains("Renew")',
+            ]
 
-            sb.sleep(5)
-            sb.refresh()
-            print("⏳ 等待新的过期时间...")
-            sb.wait_for_ready_state_complete()
-            sb.sleep(3)
+            def _modal_open():
+                try:
+                    return sb.is_element_visible('div[role="dialog"]')
+                except Exception:
+                    return False
 
-            # 提取新的到期日期和倒计时
-            try:
-                new_page_text = sb.get_page_text() + "\n" + sb.get_page_source()
-            except Exception:
-                new_page_text = sb.get_page_source()
-            new_expiry = get_expiry_from_dom(sb) or extract_expiry_date(new_page_text)
-            new_match = re.search(r"(?:Renewal cooldown|Renew in)\s+(\d{1,2}:\d{2}:\d{2})", new_page_text)
-            if new_match:
-                new_countdown = new_match.group(1)
+            def _js_click_modal():
+                return js(sb, """
+                    var btns = document.querySelectorAll('div[role="dialog"] button.btn-primary, .modal button.btn-primary');
+                    for (var i = 0; i < btns.length; i++) {
+                        if (btns[i].offsetParent !== null && !btns[i].disabled) { btns[i].click(); return true; }
+                    }
+                    return false;
+                """, False)
+
+            modal_closed = False
+            for attempt in range(3):
+                clicked = False
+                for selector in modal_selectors:
+                    try:
+                        if sb.is_element_visible(selector):
+                            sb.click(selector, timeout=8)
+                            print(f"✅ 已点击续期按钮 (尝试 {attempt + 1}, 选择器: {selector})")
+                            clicked = True
+                            break
+                    except Exception as e:
+                        print(f"⚠️ 选择器 {selector} 点击失败: {e}")
+                        continue
+                if not clicked:
+                    try:
+                        if _js_click_modal():
+                            print(f"✅ JS 点击续期按钮 (尝试 {attempt + 1})")
+                            clicked = True
+                    except Exception as e:
+                        print(f"⚠️ JS 点击失败: {e}")
+                if clicked:
+                    for _ in range(10):
+                        time.sleep(1)
+                        if not _modal_open():
+                            modal_closed = True
+                            break
+                    if modal_closed:
+                        print("✅ 续期弹窗已关闭")
+                        break
+                    print(f"⚠️ 弹窗未关闭，重试 ({attempt + 1}/3)")
+                else:
+                    print(f"⚠️ 第 {attempt + 1} 次未找到/点上续期按钮")
+                time.sleep(2)
+
+            if not modal_closed:
+                print("❌ 续期按钮点击失败，弹窗未关闭")
+                send_telegram_message(format_notification("❌ 续期失败", error="弹窗续期按钮点击失败", expiry_date=current_expiry or "（未获取到）"))
+                sys.exit(1)
+
+            # 轮询等待到期日变化或出现新倒计时，最多 60 秒
+            print("⏳ 等待新的过期时间（轮询 60 秒）...")
+            new_expiry = None
+            new_countdown = None
+            new_page_text = ""
+            poll_deadline = time.time() + 60
+            while time.time() < poll_deadline:
+                sb.refresh()
+                sb.wait_for_ready_state_complete()
+                sb.sleep(3)
+                try:
+                    new_page_text = sb.get_page_text() + "\n" + sb.get_page_source()
+                except Exception:
+                    new_page_text = sb.get_page_source()
+                new_expiry = get_expiry_from_dom(sb) or extract_expiry_date(new_page_text)
+                new_match = re.search(r"(?:Renewal cooldown|Renew in)\s+(\d{1,2}:\d{2}:\d{2})", new_page_text)
+                if new_match:
+                    new_countdown = new_match.group(1)
+                    break
+                if new_expiry and new_expiry != current_expiry:
+                    break
+                time.sleep(7)
+
+            if new_countdown:
                 print(f"✅ 续期成功！新的倒计时: {new_countdown}")
                 if new_expiry:
                     print(f"📅 新的到期日期: {new_expiry}")
@@ -528,25 +588,25 @@ def main():
                         expiry_date=new_expiry or "（未获取到）"
                     )
                 )
+            elif new_expiry and new_expiry != current_expiry:
+                print(f"✅ 续期成功，到期日期已更新为: {new_expiry}")
+                send_telegram_message(
+                    format_notification(
+                        "✅ 续期成功",
+                        extra="到期日期已更新",
+                        expiry_date=new_expiry
+                    )
+                )
             else:
-                if new_expiry and new_expiry != current_expiry:
-                    print(f"✅ 续期成功，到期日期已更新为: {new_expiry}")
-                    send_telegram_message(
-                        format_notification(
-                            "✅ 续期成功",
-                            extra="到期日期已更新",
-                            expiry_date=new_expiry
-                        )
+                print("⚠️ 续期结果未知，到期日期未变化，请手动检查")
+                send_telegram_message(
+                    format_notification(
+                        "⚠️ 续期可能未成功",
+                        extra="请登录后台检查",
+                        expiry_date=current_expiry or "（未获取到）"
                     )
-                else:
-                    print("⚠️ 续期结果未知，到期日期未变化，请手动检查")
-                    send_telegram_message(
-                        format_notification(
-                            "⚠️ 续期可能未成功",
-                            extra="请登录后台检查",
-                            expiry_date=current_expiry or "（未获取到）"
-                        )
-                    )
+                )
+                sys.exit(1)
 
         else:
             if countdown_text:
